@@ -22,10 +22,7 @@ crawler/
   crawlurl2enum.sh       katana + gospider crawl, endpoint categorization, path probe
 
 Comments/
-  comment2enum.py        HTML comment extraction + keyword triage (v3.1)
-
-tests/
-  test_comment2enum.py   unit tests for comment2enum (82 tests, no network)
+  comment2enum.py        HTML comment extraction + keyword triage 
 
 requirements.txt         Python runtime dependencies
 ```
@@ -71,7 +68,7 @@ checks availability and skips steps for missing tools.
 
 ---
 
-## nmap2enum.sh
+# nmap2enum.sh
 
 Automated live-host discovery + full port scan + deep-scan pipeline.
 
@@ -98,7 +95,7 @@ v3 fixes:
 
 ---
 
-## rpc2enum.sh
+# rpc2enum.sh
 
 Anonymous or authenticated RPC enumeration via rpcclient.
 
@@ -127,7 +124,7 @@ v3 fixes:
 
 ---
 
-## bloodhound2enum.sh
+# bloodhound2enum.sh
 
 AD enumeration + BloodHound collection (bloodyAD, bloodhound-python, rusthound).
 
@@ -149,7 +146,7 @@ v3 fixes:
 
 ---
 
-## gitcheck2enum.sh
+# gitcheck2enum.sh
 
 Clone and enumerate a git repository: history, dangling objects, reflog,
 submodules, CI files, largest blobs, secret scan.
@@ -176,7 +173,7 @@ v3 fixes:
 
 ---
 
-## crawlurl2enum.sh
+# crawlurl2enum.sh
 
 Crawl a target with katana + gospider, probe common web-root paths, categorize
 discovered endpoints.
@@ -204,7 +201,7 @@ v3 fixes:
 
 ---
 
-## comment2enum.py (v3.1)
+# comment2enum.py (v3.1)
 
 Extract and triage hidden HTML comments from web targets.
 
