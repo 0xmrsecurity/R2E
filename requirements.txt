@@ -1,15 +1,17 @@
-bloodyAD 
-net rpc
-bloodhound-python
-rusthound
-rpcclient
-fscan
-nmap
-fping
-git         
-curl                    
-git-dumper               
-trufflehog
-gitleaks 
-katana
-gospider
+# Python runtime dependencies for Comments/comment2enum.py
+#
+# The external binaries used by the shell scripts (nmap, fscan, fping,
+# rpcclient, bloodyAD, bloodhound-python, rusthound, git, curl, git-dumper,
+# trufflehog, gitleaks, katana, gospider) are NOT pip-installable from this
+# file - see the "External tools" section in README.md for installation.
+
+requests>=2.31,<3
+beautifulsoup4>=4.12,<5
+
+# Optional: faster/lenient HTML parser. comment2enum.py falls back to the
+# stdlib html.parser automatically when lxml is missing or fails to build.
+lxml>=5.0
+
+# Dev / test (not required at runtime):
+#   pip install pytest
+#   python -m pytest tests/ -v

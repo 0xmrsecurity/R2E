@@ -6,11 +6,17 @@
 # RPC_USER='USER' RPC_PASS='PASSWORD' ./rpc2enum.sh
 # RPC_USER='USER' RPC_PASS='PASSWORD' ./rpc2enum.sh [TARGET_IP]
 set -u
+set -o pipefail
 
 # Colors (dark red for [*], dark green for [+])
 DRED='\033[38;5;9m'
 DGREEN='\033[38;5;46m'
+DYELLOW='\033[38;5;226m'
 NC='\033[0m'
+
+banner()  { echo -e "${DRED}[*] $1${NC}"; }
+section() { echo -e "\n${DGREEN}[+] $1${NC}"; }
+warn()    { echo -e "${DYELLOW}[!] $1${NC}"; }
 
 show_help() {
     cat << EOF
@@ -39,39 +45,60 @@ EXAMPLES:
 WHAT IT RUNS:
     Port check (139/445), srvinfo, lsaquery, querydominfo, enumdomusers,
     enumdomgroups, enumalsgroups, querydispinfo, per-user queryuser,
-    lookupnames, RID cycling (lookupsids 500-1100), getdompwinfo,
+    lookupnames, RID cycling (lookupsids, configurable range), getdompwinfo,
     netshareenumall, enumprivs, enumprinters.
+
+ENVIRONMENT VARIABLES:
+    RPC_USER / RPC_PASS     Credentials (anonymous session when unset)
+    RPC_RID_START           RID cycle start (default: 500)
+    RPC_RID_END             RID cycle end   (default: 1100)
+
+All console output is also saved to a timestamped loot directory.
 EOF
 }
 
-# Parse args: catch -h/--help before treating anything as the target IP
-for arg in "$@"; do
-    case "$arg" in
-        -h|--help)
-            show_help
-            exit 0
-            ;;
+# ---- Argument parsing (while loop: options and positional target in any order)
+IP=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)   show_help; exit 0 ;;
+        -t|--target) [[ -n "${2:-}" ]] || { warn "-t/--target needs a value."; exit 1; }
+                     IP="$2"; shift 2 ;;
+        -*)          warn "Unknown option: $1 (use -h for help)"; shift ;;
+        *)           IP="$1"; shift ;;
     esac
 done
 
-IP="${1:-}"
 if [[ -z "$IP" ]]; then
     read -rp "Provide the Target IP address:- " IP
 fi
+[[ -n "$IP" ]] || { warn "No target given. Exiting."; exit 1; }
 
-USER="${RPC_USER:-}"        # override with RPC_USER=... ./rpc2enum.sh
-PASS="${RPC_PASS:-}"        # override with RPC_PASS=...
+# NB: never assign to plain USER/PASS - clobbering $USER leaks the target
+# username into every child process environment.
+RC_USER="${RPC_USER:-}"
+RC_PASS="${RPC_PASS:-}"
+RID_START="${RPC_RID_START:-500}"
+RID_END="${RPC_RID_END:-1100}"
+[[ "$RID_START" =~ ^[0-9]+$ && "$RID_END" =~ ^[0-9]+$ ]] || { warn "RPC_RID_START/END must be integers."; exit 1; }
 
-if [[ -n "$USER" ]]; then
+# ---- Tool checks ----
+command -v rpcclient &>/dev/null || { warn "rpcclient not found (apt install samba-common-bin). Exiting."; exit 1; }
+HAVE_NC=1; command -v nc &>/dev/null || { warn "nc not found - skipping port check."; HAVE_NC=0; }
+
+# ---- Loot directory: everything printed is also saved ----
+OUTDIR="rpc_loot_${IP//./_}_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$OUTDIR"
+chmod 700 "$OUTDIR"
+exec > >(tee "$OUTDIR/rpc2enum-console.txt") 2>&1
+
+if [[ -n "$RC_USER" ]]; then
     # Real credentials supplied -> authenticate properly, no -N
-    AUTH=(-U "${USER}%${PASS}")
+    AUTH=(-U "${RC_USER}%${RC_PASS}")
 else
     # No credentials -> fall back to null/anonymous session
     AUTH=(-U "" -N)
 fi
-
-section() { echo -e "\n${DGREEN}[+] $1${NC}"; }
-banner() { echo -e "${DRED}[*] $1${NC}"; }
 
 run() {
     # run "description" "rpcclient command"
@@ -79,11 +106,15 @@ run() {
 }
 
 banner "Rpc-client Enumeration script.."
-banner "Target: $IP  (auth: '${USER:-anonymous}')"
+banner "Target: $IP  (auth: '${RC_USER:-anonymous}')  loot: $OUTDIR"
 
 section "Checking if RPC/SMB port is open (139/445)"
-nc -zv -w3 "$IP" 139 2>&1
-nc -zv -w3 "$IP" 445 2>&1
+if [[ "$HAVE_NC" -eq 1 ]]; then
+    nc -zv -w3 "$IP" 139 2>&1 || true
+    nc -zv -w3 "$IP" 445 2>&1 || true
+else
+    echo "skipped (nc missing)."
+fi
 
 section "Server Info (srvinfo)"
 run "srvinfo" "srvinfo"
@@ -110,22 +141,23 @@ run "querydispinfo" "querydispinfo"
 
 section "Per-user detail (queryuser) for each RID found"
 # pull rid:[0x...] out of enumdomusers output and query each one
-echo "$USERS_RAW" | grep -oP 'rid:\[\K0x[0-9a-fA-F]+' | while read -r rid; do
+# sed, not grep -oP: PCRE (-P) is GNU-only and absent on BSD/macOS grep.
+echo "$USERS_RAW" | sed -n 's/.*rid:\[\(0x[0-9a-fA-F]*\)\].*/\1/p' | while read -r rid; do
     echo "--- RID $rid ---"
     run "queryuser $rid" "queryuser $rid"
 done
 
 section "SID Lookup for known usernames (lookupnames)"
-echo "$USERS_RAW" | grep -oP 'user:\[\K[^]]+' | while read -r uname; do
+echo "$USERS_RAW" | sed -n 's/user:\[\([^]]*\)\].*/\1/p' | while read -r uname; do
     run "lookupnames $uname" "lookupnames $uname"
 done
 
-section "RID Cycling / SID brute force (lookupsids, 500-1100)"
-DOMSID=$(run "lsaquery" "lsaquery" | grep -oP 'S-1-5-21-[0-9-]+')
+section "RID Cycling / SID brute force (lookupsids, $RID_START-$RID_END)"
+DOMSID=$(run "lsaquery" "lsaquery" | grep -oE 'S-1-5-21-[0-9-]+' | head -n1)
 if [[ -n "$DOMSID" ]]; then
     echo "Domain SID: $DOMSID"
-    for rid in $(seq 500 1100); do
-        run "lookupsids $DOMSID-$rid" "lookupsids $DOMSID-$rid" | grep -v -E "NT_STATUS_NONE_MAPPED|\*unknown\*\\\\\*unknown\*"
+    for rid in $(seq "$RID_START" "$RID_END"); do
+        run "lookupsids $DOMSID-$rid" "lookupsids $DOMSID-$rid" | grep -v -E "NT_STATUS_NONE_MAPPED|\*unknown\*\\\\\*unknown\*" || true
     done
 else
     echo "Could not resolve domain SID, skipping RID cycle."
@@ -142,3 +174,6 @@ run "enumprivs" "enumprivs"
 
 section "Printer Enumeration (enumprinters)"
 run "enumprinters" "enumprinters"
+
+section "Done"
+echo "Console log saved to: $OUTDIR/rpc2enum-console.txt"

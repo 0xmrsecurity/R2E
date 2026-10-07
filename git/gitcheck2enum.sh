@@ -137,7 +137,11 @@ else
             warn "Disabling SSL verification skips certificate validation - only do this"
             warn "against targets you trust (e.g. lab/internal environments)."
             section "Cloning (SSL verification OFF): $URL"
-            rm -rf "$REPO_DIR"
+            # Guard before recursive delete: never rm -rf an empty, dot,
+            # or root path in case SAFE_NAME ever came out odd.
+            if [[ -n "$REPO_DIR" && "$REPO_DIR" != "/" && "$REPO_DIR" != "." && -d "$REPO_DIR" ]]; then
+                rm -rf -- "$REPO_DIR"
+            fi
             GIT_SSL_NO_VERIFY=true git -c http.sslVerify=false clone "$URL" "$REPO_DIR"
         fi
     fi
@@ -150,6 +154,11 @@ fi
 
 cd "$REPO_DIR" || { warn "Failed to cd into $REPO_DIR. Exiting."; exit 1; }
 section "Working inside: $(pwd)"
+
+# ---- Loot directory: bulk dumps go to files, console stays readable ----
+OUTDIR="git_loot_${SAFE_NAME}_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$OUTDIR"
+chmod 700 "$OUTDIR"
 
 # ---- Authors ----
 section "Authors"
@@ -174,10 +183,13 @@ git tag
 # ---- Commit list + full per-commit diff dump ----
 section "Commit list"
 mapfile -t COMMITS < <(git log --oneline --all | cut -d ' ' -f1)
-echo "Found ${#COMMITS[@]} commits."
+echo "Found ${#COMMITS[@]} commits. Full per-commit diff saved to: $OUTDIR/full-history.diff"
+: > "$OUTDIR/full-history.diff"
 for c in "${COMMITS[@]}"; do
-    echo "===== commit $c ====="
-    git show "$c"
+    {
+        echo "===== commit $c ====="
+        git show "$c"
+    } >> "$OUTDIR/full-history.diff" 2>&1
 done
 
 # ---- Commit graph across all branches ----
@@ -189,11 +201,14 @@ section "Dangling commits / unreachable objects (git fsck)"
 mapfile -t DANGLING < <(git fsck --no-reflog 2>/dev/null | awk '/dangling commit/ {print $3}')
 if [[ ${#DANGLING[@]} -gt 0 ]]; then
     warn "${#DANGLING[@]} dangling commit(s) found - not reachable from any"
-    warn "branch/tag but not yet garbage-collected. Dumping their diffs:"
+    warn "branch/tag but not yet garbage-collected. Diffs saved to: $OUTDIR/dangling.diff"
+    : > "$OUTDIR/dangling.diff"
     for dc in "${DANGLING[@]}"; do
-        echo "===== dangling commit $dc ====="
-        git show -s --format="%H %ai %s" "$dc"
-        git show "$dc"
+        {
+            echo "===== dangling commit $dc ====="
+            git show -s --format="%H %ai %s" "$dc"
+            git show "$dc"
+        } >> "$OUTDIR/dangling.diff" 2>&1
     done
 else
     echo "No dangling commits found."
@@ -241,7 +256,11 @@ CI_FILES=$(find . -path ./.git -prune -o \( -path '*/.github/workflows/*.yml' -o
 if [[ -n "$CI_FILES" ]]; then
     echo "$CI_FILES"
     echo "--- content ---"
-    echo "$CI_FILES" | xargs cat 2>/dev/null
+    # while-read, not xargs: filenames containing whitespace break 'xargs cat'.
+    while IFS= read -r f; do
+        echo "===== $f ====="
+        cat "$f" 2>/dev/null
+    done <<< "$CI_FILES"
 else
     echo "No CI/CD workflow files found in the working tree."
 fi
@@ -254,8 +273,19 @@ git rev-list --objects --all 2>/dev/null \
 
 # ---- Secrets / automation check (with matched keywords highlighted inline) ----
 section "Secrets / automation check (matches highlighted)"
-git log -p --all --full-history 2>/dev/null | grep --color=always -iE \
-    "(postgres|mysql|mongodb|DATABASE_URL|DB_URL|sqlalchemy|sqlite|redis|connection_string|passwd|password|pwd|api_key|api_secret|secret_key|secret|token|auth_token|bearer|private_key|access_key|aws_key|aws_access|aws_secret|AWS_ACCESS_KEY|AWS_SECRET|S3_BUCKET|http|https|ftp|endpoint|base_url|host|port|username|user|db|db_name|MONGO_URI|REDIS_URL|JWT_SECRET|NEXTAUTH|STRIPE|SENDGRID|TWILIO|firebase|supabase|clerk|oauth|client_id|bucket|ec2|client_secret)"
+# High-signal only. The old pattern listed bare words (http|host|port|user|
+# db|secret|token|...) which matched almost EVERY diff line - zero triage
+# value at volume. This version matches concrete credential shapes instead:
+# known token/key prefixes, URIs with embedded user:pass, PEM blocks, and
+# key=value assignment forms with a minimum secret length.
+SECRETS_RE="(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|pk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(postgres(ql)?|mysql|mongodb(\+srv)?|redis|amqp)://[^ :/]+:[^@]+@|jdbc:[a-zA-Z]+://[^ ]*:[^ ]*@|(password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|client[_-]?secret|jwt[_-]?secret)[\"' ]*[:=][ \"']*[A-Za-z0-9/+_=.,:@-]{8,})"
+git log -p --all --full-history 2>/dev/null | grep -inE "$SECRETS_RE" > "$OUTDIR/secrets-grep.txt" || true
+if [[ -s "$OUTDIR/secrets-grep.txt" ]]; then
+    echo "Matches saved to: $OUTDIR/secrets-grep.txt - first 50:"
+    head -50 "$OUTDIR/secrets-grep.txt"
+else
+    echo "No high-signal secret patterns matched."
+fi
 
 # ---- TruffleHog (verified secrets, if installed) ----
 section "TruffleHog scan (verified secrets, if installed)"
@@ -269,9 +299,9 @@ if command -v trufflehog &>/dev/null; then
         warn "Detected TruffleHog v2 (legacy Python) - it has no verified-secret"
         warn "mode, so results here are regex+entropy based, same signal class"
         warn "as the grep check above, not a strictly higher-confidence pass."
-        trufflehog --regex --entropy=True "file://$(pwd)"
+        trufflehog --regex --entropy=True "file://$(pwd)" 2>&1 | tee "$OUTDIR/trufflehog.txt"
     else
-        trufflehog git "file://$(pwd)" --only-verified
+        trufflehog git "file://$(pwd)" --only-verified 2>&1 | tee "$OUTDIR/trufflehog.txt"
     fi
 else
     warn "trufflehog not installed - skipping. (pipx install trufflehog for verified-secret detection)"
@@ -280,7 +310,7 @@ fi
 # ---- Gitleaks (if installed) ----
 section "Gitleaks scan (if installed)"
 if command -v gitleaks &>/dev/null; then
-    gitleaks detect -v --source .
+    gitleaks detect -v --source . 2>&1 | tee "$OUTDIR/gitleaks.txt"
 else
     warn "gitleaks not installed - skipping. (apt install gitleaks for a second-opinion secrets scan)"
 fi
@@ -289,4 +319,5 @@ cd - > /dev/null
 
 section "Done"
 echo "Repo left on disk at: $REPO_DIR"
+echo "Bulk dumps (history, dangling, secrets, scanner logs) in: $OUTDIR"
 exit 0

@@ -9,6 +9,7 @@
 # Env var overrides  
 #   BH_FQDN, BH_DOMAIN, BH_IP, BH_USER, BH_PASS
 set -u
+set -o pipefail
 
 DRED='\033[38;5;9m'
 DGREEN='\033[38;5;46m'
@@ -51,7 +52,12 @@ WHAT IT RUNS:
     4. bloodhound-python    (-c All --zip)
     5. rusthound            (--zip)
 
-    All loot is collected into a timestamped output directory.
+    All loot is collected into a timestamped output directory (chmod 700).
+
+SECURITY NOTE:
+    The collector tools take the password as a command-line argument, so
+    it is briefly visible in 'ps' output. On a shared or multi-user box,
+    run this script on a dedicated host you control.
 
 EOF
 }
@@ -60,8 +66,10 @@ EOF
 FQDN="${BH_FQDN:-}"
 DOMAIN="${BH_DOMAIN:-}"
 IP="${BH_IP:-}"
-USER="${BH_USER:-}"
-PASS="${BH_PASS:-}"
+# Distinct local names: assigning to plain USER/PASS clobbers the
+# environment variables every child process inherits.
+BH_USERNAME="${BH_USER:-}"
+BHPASS="${BH_PASS:-}"
 
 # ---- Argument parsing ----
 while [[ $# -gt 0 ]]; do
@@ -77,9 +85,9 @@ while [[ $# -gt 0 ]]; do
         -i|--ip)
             IP="$2"; shift 2 ;;
         -u|--user)
-            USER="$2"; shift 2 ;;
+            BH_USERNAME="$2"; shift 2 ;;
         -p|--pass)
-            PASS="$2"; shift 2 ;;
+            BHPASS="$2"; shift 2 ;;
         *)
             warn "Unknown argument: $1 (use -h for help)"
             shift
@@ -91,8 +99,8 @@ done
 [[ -z "$FQDN"   ]] && read -rp   "Enter Domain FQDN (dc.example.local):- " FQDN
 [[ -z "$DOMAIN" ]] && read -rp   "Enter Domain Name (example.local):- " DOMAIN
 [[ -z "$IP"     ]] && read -rp   "Enter Domain IP Address:- " IP
-[[ -z "$USER"   ]] && read -rp   "Put Valid Username :- " USER
-[[ -z "$PASS"   ]] && read -rsp  "Put valid Password for above user:- " PASS && echo
+[[ -z "$BH_USERNAME" ]] && read -rp   "Put Valid Username :- " BH_USERNAME
+[[ -z "$BHPASS"      ]] && read -rsp  "Put valid Password for above user:- " BHPASS && echo
 
  
 check_tool() {
@@ -109,15 +117,24 @@ HAVE_BHPY=1;       check_tool bloodhound-python || HAVE_BHPY=0
 HAVE_RUSTHOUND=1;  check_tool rusthound  || HAVE_RUSTHOUND=0
 
  
-OUTDIR="bh_loot_${DOMAIN}"
+OUTDIR="bh_loot_${DOMAIN}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUTDIR"
+chmod 700 "$OUTDIR"
 
 banner "BloodHound Enumeration script.."
-banner "Domain: $DOMAIN  FQDN: $FQDN  DC IP: $IP  User: $USER"
+banner "Domain: $DOMAIN  FQDN: $FQDN  DC IP: $IP  User: $BH_USERNAME"
 banner "Loot directory: $OUTDIR"
 
 section "Checking FQDN resolution ($FQDN)"
-if ! getent hosts "$FQDN" &>/dev/null; then
+resolve_fqdn() {
+    # getent is glibc-only; fall back to dig/host elsewhere.
+    if command -v getent &>/dev/null; then getent hosts "$1" &>/dev/null
+    elif command -v dig &>/dev/null; then dig +short "$1" | grep -q .
+    elif command -v host &>/dev/null; then host "$1" &>/dev/null
+    else return 1
+    fi
+}
+if ! resolve_fqdn "$FQDN"; then
     warn "'$FQDN' does not resolve. Kerberos auth (used by bloodhound-python/rusthound)"
     warn "needs this to resolve, or it silently falls back to weaker NTLM auth."
 
@@ -160,7 +177,7 @@ fi
 # ---- 1. Domain Users via net rpc ----
 if [[ "$HAVE_NET" -eq 1 ]]; then
     section "AD Users Enumeration (saved ${OUTDIR}/users.txt)"
-    net rpc group members 'Domain Users' -W "$DOMAIN" -S "$IP" -U "$USER%$PASS" \
+    net rpc group members 'Domain Users' -W "$DOMAIN" -S "$IP" -U "${BH_USERNAME}%${BHPASS}" \
         | cut -d '\' -f2 | tee "$OUTDIR/users.txt"
     sleep 1
 fi
@@ -168,7 +185,7 @@ fi
 # ---- 2. Domain Computers via bloodyAD ----
 if [[ "$HAVE_BLOODYAD" -eq 1 ]]; then
     section "AD Computers Enumeration (saved ${OUTDIR}/computers.txt)"
-    bloodyAD --host "$IP" -d "$DOMAIN" -u "$USER" -p "$PASS" get search --filter "(objectClass=computer)" --attr sAMAccountName,dNSHostName,operatingSystem \
+    bloodyAD --host "$IP" -d "$DOMAIN" -u "$BH_USERNAME" -p "$BHPASS" get search --filter "(objectClass=computer)" --attr sAMAccountName,dNSHostName,operatingSystem \
         | tee "$OUTDIR/computers.txt"
     sleep 1
 fi
@@ -176,21 +193,21 @@ fi
 # ---- 3. bloodyAD ----
 if [[ "$HAVE_BLOODYAD" -eq 1 ]]; then
     section "BloodyAD Collection (transitive)"
-    ( cd "$OUTDIR" && bloodyAD --host "$IP" -d "$DOMAIN" -u "$USER" -p "$PASS" get bloodhound --transitive --path . )
+    ( cd "$OUTDIR" && bloodyAD --host "$IP" -d "$DOMAIN" -u "$BH_USERNAME" -p "$BHPASS" get bloodhound --transitive --path . )
     sleep 1
 fi
 
 # ---- 4. bloodhound-python ----
 if [[ "$HAVE_BHPY" -eq 1 ]]; then
     section "BloodHound.py Collection (Legacy collector, -c All --zip)"
-    ( cd "$OUTDIR" && bloodhound-python -d "$DOMAIN" -u "$USER" -p "$PASS" -ns "$IP" -dc "$FQDN" -c All --zip )
+    ( cd "$OUTDIR" && bloodhound-python -d "$DOMAIN" -u "$BH_USERNAME" -p "$BHPASS" -ns "$IP" -dc "$FQDN" -c All --zip )
     sleep 1
 fi
 
 # ---- 5. rusthound (BloodHound CE) ----
 if [[ "$HAVE_RUSTHOUND" -eq 1 ]]; then
     section "RustHound-CE Collection (--zip)"
-    ( cd "$OUTDIR" && rusthound --domain "$DOMAIN" -f "$FQDN" -i "$IP" -u "$USER" -p "$PASS" --zip )
+    ( cd "$OUTDIR" && rusthound --domain "$DOMAIN" -f "$FQDN" -i "$IP" -u "$BH_USERNAME" -p "$BHPASS" --zip )
     sleep 1
 fi
 

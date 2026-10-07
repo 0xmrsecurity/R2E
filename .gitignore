@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Tool output / loot dirs produced by the scripts
+scan_*/
+rpc_loot_*/
+bh_loot_*/
+git_loot_*/
+comments_*/
+crawl_report_*.txt
+found_comments.json
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

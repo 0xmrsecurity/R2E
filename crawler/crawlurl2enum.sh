@@ -140,12 +140,15 @@ if [[ "$HAVE_KATANA" -eq 0 && "$HAVE_GOSPIDER" -eq 0 && "$NO_PATH_PROBE" -eq 1 ]
 fi
 
 WORKDIR=$(mktemp -d /tmp/crawlurl2enum.XXXXXX)
+REPORT="crawl_report_$(date +%Y%m%d_%H%M%S).txt"
+exec > >(tee "$REPORT") 2>&1
 cleanup() {
     if [[ "$KEEP_RAW" -eq 1 ]]; then
         echo "Raw crawl data kept at: $WORKDIR"
     else
         rm -rf "$WORKDIR"
     fi
+    echo "Report saved to: $REPORT"
 }
 trap cleanup EXIT
 
@@ -267,8 +270,12 @@ extract_category() {
     if [[ -n "$matches" ]]; then
         cat_head "$label" "$outvar_count"
         echo "$matches"
-        # remove matched lines from the remaining pool so buckets stay exclusive
-        grep -ivE "$pattern" "$REMAINING" > "$REMAINING.tmp" && mv "$REMAINING.tmp" "$REMAINING"
+        # Remove matched lines so buckets stay exclusive. NB: the old
+        # 'grep ... && mv' was a bug - when the pattern matched EVERY
+        # remaining line, grep -iv exits 1 (no output), mv never ran, and
+        # the stale pool was re-reported by every later bucket.
+        grep -ivE "$pattern" "$REMAINING" > "$REMAINING.tmp" || true
+        mv "$REMAINING.tmp" "$REMAINING"
     else
         echo "None found."
     fi
