@@ -1,4 +1,4 @@
-# ad2enum
+# Recon2Enum
 
 Active Directory and web enumeration scripts for authorized security testing
 (bug bounty recon, pentests, labs).
