@@ -101,8 +101,8 @@ else
 fi
 
 run() {
-    # run "description" "rpcclient command"
-    rpcclient "${AUTH[@]}" "$IP" -c "$2" 2>&1
+    # Run an rpcclient command while suppressing access-denied noise.
+    rpcclient "${AUTH[@]}" "$IP" -c "$2" 2>&1 | sed '/NT_STATUS_ACCESS_DENIED/d'
 }
 
 banner "Rpc-client Enumeration script.."
