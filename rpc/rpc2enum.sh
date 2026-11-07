@@ -3,6 +3,7 @@
 # ./rpc2enum.sh
 # ./rpc2enum.sh [TARGET_IP]
 # ./rpc2enum.sh -h | --help
+# ./rpc2enum.sh -q [TARGET_IP]
 # RPC_USER='USER' RPC_PASS='PASSWORD' ./rpc2enum.sh
 # RPC_USER='USER' RPC_PASS='PASSWORD' ./rpc2enum.sh [TARGET_IP]
 set -u
@@ -23,10 +24,12 @@ show_help() {
 rpc2enum.sh - Anonymous/authenticated RPC enumeration wrapper for rpcclient
 
 USAGE:
-    ./rpc2enum.sh [-h|--help] [TARGET_IP]
+    ./rpc2enum.sh [-h|--help] [-q|--quiet] [TARGET_IP]
 
 OPTIONS:
     -h, --help      Show this help message and exit
+    -q, --quiet     Suppress noisy NT_STATUS_* and unknown-entry lines,
+                    while keeping valid RPC responses visible.
 
 ARGUMENTS:
     TARGET_IP       IP address of the target (DC/SMB host). If omitted,
@@ -39,6 +42,7 @@ AUTHENTICATION (environment variables, optional):
 EXAMPLES:
     ./rpc2enum.sh
     ./rpc2enum.sh 10.129.60.23
+    ./rpc2enum.sh -q 10.129.60.23
     RPC_USER='j.arbuckle' RPC_PASS='P@ssw0rd' ./rpc2enum.sh
     RPC_USER='j.arbuckle' RPC_PASS='P@ssw0rd' ./rpc2enum.sh 10.129.60.23
 
@@ -52,22 +56,41 @@ ENVIRONMENT VARIABLES:
     RPC_USER / RPC_PASS     Credentials (anonymous session when unset)
     RPC_RID_START           RID cycle start (default: 500)
     RPC_RID_END             RID cycle end   (default: 1100)
+    RPC_QUIET               Set to 1 to enable quiet filtering by default
 
 All console output is also saved to a timestamped loot directory.
 EOF
 }
 
+filter_rpc_output() {
+    sed -E \
+        -e '/NT_STATUS_ACCESS_DENIED/d' \
+        -e '/NT_STATUS_LOGON_FAILURE/d' \
+        -e '/NT_STATUS_NONE_MAPPED/d' \
+        -e '/NT_STATUS_NO_SUCH_ALIAS/d' \
+        -e '/NT_STATUS_NO_SUCH_MEMBER/d' \
+        -e '/NT_STATUS_INVALID_PARAMETER/d' \
+        -e '/NT_STATUS_NOT_FOUND/d' \
+        -e '/\*unknown\*\\\*unknown\*/d' \
+        -e '/^[[:space:]]*$/d'
+}
+
 # ---- Argument parsing (while loop: options and positional target in any order)
 IP=""
+QUIET="${RPC_QUIET:-0}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)   show_help; exit 0 ;;
+        -q|--quiet)  QUIET=1; shift ;;
         -t|--target) [[ -n "${2:-}" ]] || { warn "-t/--target needs a value."; exit 1; }
                      IP="$2"; shift 2 ;;
         -*)          warn "Unknown option: $1 (use -h for help)"; shift ;;
         *)           IP="$1"; shift ;;
     esac
 done
+
+# quiet is required to be numeric
+[[ "$QUIET" =~ ^[01]$ ]] || { warn "RPC_QUIET must be 0 or 1."; exit 1; }
 
 if [[ -z "$IP" ]]; then
     read -rp "Provide the Target IP address:- " IP
@@ -101,8 +124,14 @@ else
 fi
 
 run() {
-    # Run an rpcclient command while suppressing access-denied noise.
-    rpcclient "${AUTH[@]}" "$IP" -c "$2" 2>&1 | sed '/NT_STATUS_ACCESS_DENIED/d'
+    # Run an rpcclient command and strip common noisy NT_STATUS errors.
+    local cmd_output
+    cmd_output=$(rpcclient "${AUTH[@]}" "$IP" -c "$2" 2>&1)
+    if [[ "$QUIET" -eq 1 ]]; then
+        printf '%s\n' "$cmd_output" | filter_rpc_output
+    else
+        printf '%s\n' "$cmd_output"
+    fi
 }
 
 banner "Rpc-client Enumeration script.."
